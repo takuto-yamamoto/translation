@@ -143,7 +143,7 @@
 
 <header id="hero">
   <h1>PLaMo 論文翻訳</h1>
-  <p>Mac の中だけで動く、英語論文の翻訳ツール</p>
+  <p>英語論文の翻訳ツール</p>
 </header>
 
 <div id="offline" class="banner" hidden>
@@ -213,7 +213,6 @@
     <input type="text" id="url">
     <label class="f" for="model">モデル名</label>
     <input type="text" id="model">
-    <div class="hint">8B を試すなら <code>hf.co/pfnet/plamo-3-translate-8b-GGUF:Q3_K_M</code>（ターミナルで一度 <code>ollama run</code> しておく）</div>
   </details>
 
   <div class="row" style="margin-top:18px">
@@ -278,22 +277,14 @@ async function checkConnection() {
     const has = models.some((m) => (m.name || m.model || '').toLowerCase() === want);
     connected = true;
     if (has) { setStatus('ok', '接続OK'); $('#offline').hidden = true; }
-    else {
-      setStatus('warn', 'モデル未ダウンロード');
-      showOffline('モデルがまだダウンロードされていません',
-        `ターミナルで次を一度実行してください。<pre class="cmd">ollama run ${esc(S.model)}</pre>`);
-    }
+    else { setStatus('warn', 'モデルなし'); showOffline('モデルが見つかりません', ''); }
   } catch {
     connected = false;
     // 動いているのに断られているのか、そもそも動いていないのかを見分ける
     let alive = false;
     try { await fetch(base() + '/api/version', { mode: 'no-cors' }); alive = true; } catch {}
-    setStatus('err', alive ? '接続が許可されていません' : 'Ollama 未起動');
-    if (alive) showOffline('Ollama は動いていますが、このページからの接続が許可されていません',
-      `ターミナルで次を実行してください（Ollama が新しい設定で起動し直します）。<pre class="cmd">pkill -x ollama; pkill -x Ollama; sleep 1; open -a Ollama</pre>
-       Chrome で「ローカル ネットワークへのアクセス」を聞かれたら「許可」を押してください。`);
-    else showOffline('Ollama が起動していません',
-      'Launchpad かアプリケーションフォルダから <b>Ollama</b> を開いてください。起動したら自動でつながります。');
+    setStatus('err', alive ? '接続が許可されていません' : '未接続');
+    showOffline(alive ? '接続が許可されていません' : '接続できません', '自動で再接続します。');
     retryTimer = setTimeout(checkConnection, 4000);
   }
 }
