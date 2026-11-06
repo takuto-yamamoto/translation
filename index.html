@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLaMo 論文翻訳</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --card: #fff; --ink: #1d1d1f; --sub: #6e6e73; --line: #e3e1dc;
+    --accent: #2f5bea; --ok: #1f8a4c; --warn: #b26a00; --err: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18181a; --card: #222225; --ink: #ececef; --sub: #9a9aa2; --line: #34343a; --accent: #7b9bff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px;
+    padding: 10px 20px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .status { font-size: 13px; padding: 2px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--sub); cursor: pointer; }
+  .status.ok { color: var(--ok); border-color: var(--ok); }
+  .status.warn { color: var(--warn); border-color: var(--warn); }
+  .status.err { color: var(--err); border-color: var(--err); }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  button, select, input[type=text], textarea {
+    font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  button { padding: 6px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  select { padding: 6px 8px; }
+  .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 18px; text-align: center; color: var(--sub); margin-bottom: 12px; }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  .drop label { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  textarea#src { width: 100%; min-height: 180px; padding: 12px; resize: vertical; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0; }
+  .row .grow { flex: 1; }
+  #progress { color: var(--sub); font-size: 13px; }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-bottom: 12px; display: none; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0; background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+  .pair > div { padding: 12px 14px; white-space: pre-wrap; word-break: break-word; }
+  .pair .en { color: var(--sub); font-size: 14px; border-right: 1px solid var(--line); }
+  .pair .ja { position: relative; }
+  .pair .ja.pending { color: var(--sub); font-style: italic; }
+  .pair .ja.error { color: var(--err); }
+  .pair .redo { position: absolute; right: 8px; bottom: 6px; font-size: 12px; padding: 1px 8px; opacity: 0; }
+  .pair:hover .redo { opacity: 1; }
+  @media (max-width: 760px) { .pair { grid-template-columns: 1fr; } .pair .en { border-right: 0; border-bottom: 1px solid var(--line); } }
+  .hint { color: var(--sub); font-size: 13px; }
+  dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink);
+    width: min(640px, 94vw); padding: 22px; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog h2 { margin: 0 0 12px; font-size: 18px; }
+  dialog label.f { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 14px; }
+  dialog input[type=text], dialog textarea { width: 100%; padding: 8px 10px; }
+  dialog textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  pre.cmd { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto;
+    font-size: 12.5px; white-space: pre-wrap; word-break: break-all; user-select: all; }
+  #help { display: none; }
+  #help.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PLaMo 論文翻訳</h1>
+  <span id="status" class="status" title="クリックで再接続">確認中…</span>
+  <button id="settingsBtn">設定</button>
+</header>
+
+<main>
+  <div id="drop" class="drop">
+    論文のPDFをここにドロップ、または <label>ファイルを選ぶ<input type="file" id="file" accept=".pdf,application/pdf" hidden></label>
+    <div class="hint">PDFの本文を取り出して下の欄に入れます。翻訳の前に、いらない部分を消してもかまいません。</div>
+  </div>
+
+  <textarea id="src" placeholder="ここに英語の文章を貼り付け（PDFからコピーした改行はそのままでOK。段落は自動で分けます）"></textarea>
+
+  <div class="row">
+    <select id="target" title="翻訳先">
+      <option value="ja">→ 日本語</option>
+      <option value="en">→ 英語</option>
+    </select>
+    <select id="form" title="文体（日本語のみ）">
+      <option value="plain">である調</option>
+      <option value="polite">です・ます調</option>
+      <option value="">指定なし</option>
+    </select>
+    <button id="go" class="primary">翻訳する（⌘+Enter）</button>
+    <button id="stop" disabled>止める</button>
+    <span class="grow"></span>
+    <span id="progress"></span>
+  </div>
+  <div class="bar" id="bar"><div></div></div>
+
+  <section id="out"></section>
+
+  <div class="row" id="exportRow" style="display:none">
+    <button id="copyAll">訳文をすべてコピー</button>
+    <button id="dlMd">原文と訳を Markdown で保存</button>
+    <button id="clear">結果を消す</button>
+  </div>
+</main>
+
+<dialog id="settings">
+  <h2>設定</h2>
+  <label class="f" for="url">Ollama のアドレス</label>
+  <input type="text" id="url">
+  <label class="f" for="model">モデル名</label>
+  <input type="text" id="model">
+  <div class="hint">8B を試すなら <code>hf.co/pfnet/plamo-3-translate-8b-GGUF:Q3_K_M</code>（ターミナルで一度 <code>ollama run</code> しておくこと）</div>
+
+  <label class="f" for="glossary">用語集（1行に1つ「英語 = 訳語」）</label>
+  <textarea id="glossary" placeholder="attention = アテンション&#10;fine-tuning = ファインチューニング&#10;baseline = ベースライン"></textarea>
+  <div class="hint">段落に出てくる用語だけをモデルに渡します。訳語を統一したい専門用語を入れてください。</div>
+
+  <label class="f"><input type="checkbox" id="useContext"> 直前の段落を文脈としてモデルに渡す（訳のつながりが良くなる）</label>
+  <label class="f"><input type="checkbox" id="cutRefs"> PDF読み込み時に「References」以降を除く</label>
+
+  <div id="help">
+    <h2 style="margin-top:20px">つながらないとき</h2>
+    <ol class="hint" style="padding-left:18px">
+      <li>メニューバーに Ollama（ラマのアイコン）が出ているか確認。なければ Ollama アプリを起動。</li>
+      <li>このページから Ollama を使う許可を出します。ターミナルで次を実行してから、Ollama をメニューバーから「Quit」して起動し直してください。
+        <pre class="cmd" id="originCmd"></pre>
+        Mac を再起動すると設定が消えます。ずっと有効にする方法は README を見てください。</li>
+      <li>Chrome で「ローカルネットワークへのアクセス」の確認が出たら「許可」を押す。</li>
+    </ol>
+  </div>
+
+  <div class="row" style="margin-top:18px">
+    <button id="check">接続を確認</button>
+    <span id="checkMsg" class="hint grow"></span>
+    <button id="closeSettings" class="primary">閉じる</button>
+  </div>
+</dialog>
+
+<script type="module">
+const STOP = ['<|plamo:tag|>', '<|plamo:bos|>'];
+const DEFAULTS = {
+  url: 'http://localhost:11434',
+  model: 'hf.co/pfnet/plamo-3-translate-2b-GGUF:Q4_K_M',
+  target: 'ja', form: 'plain', glossary: '', useContext: true, cutRefs: true,
+};
+const $ = (s) => document.querySelector(s);
+
+// ---------- 設定の保存（使えないブラウザでも動くように） ----------
+let S = { ...DEFAULTS };
+try { S = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('plamo-settings') || '{}') }; } catch {}
+const save = () => { try { localStorage.setItem('plamo-settings', JSON.stringify(S)); } catch {} };
+
+$('#target').value = S.target; $('#form').value = S.form;
+$('#url').value = S.url; $('#model').value = S.model; $('#glossary').value = S.glossary;
+$('#useContext').checked = S.useContext; $('#cutRefs').checked = S.cutRefs;
+const syncForm = () => { $('#form').disabled = $('#target').value !== 'ja'; };
+syncForm();
+$('#target').onchange = () => { S.target = $('#target').value; syncForm(); save(); };
+$('#form').onchange = () => { S.form = $('#form').value; save(); };
+for (const id of ['url', 'model', 'glossary']) $('#' + id).oninput = (e) => { S[id] = e.target.value.trim() === '' && id !== 'glossary' ? DEFAULTS[id] : e.target.value; save(); };
+for (const id of ['useContext', 'cutRefs']) $('#' + id).onchange = (e) => { S[id] = e.target.checked; save(); };
+
+const base = () => S.url.replace(/\/+$/, '');
+const origin = location.origin && location.origin !== 'null' ? location.origin : '*';
+$('#originCmd').textContent = `launchctl setenv OLLAMA_ORIGINS "${origin}"`;
+
+$('#settingsBtn').onclick = () => $('#settings').showModal();
+$('#closeSettings').onclick = () => { $('#settings').close(); checkConnection(); };
+
+// ---------- 接続確認 ----------
+async function checkConnection() {
+  const st = $('#status');
+  st.className = 'status'; st.textContent = '確認中…';
+  try {
+    const r = await fetch(base() + '/api/tags');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const { models = [] } = await r.json();
+    const want = S.model.toLowerCase();
+    const has = models.some((m) => (m.name || m.model || '').toLowerCase() === want ||
+                                    (m.name || '').toLowerCase().startsWith(want.split(':')[0]));
+    if (has) { st.className = 'status ok'; st.textContent = '接続OK'; $('#checkMsg').textContent = 'Ollama とモデルが見つかりました。'; $('#help').classList.remove('show'); }
+    else { st.className = 'status warn'; st.textContent = 'モデル未ダウンロード';
+      $('#checkMsg').textContent = `ターミナルで「ollama run ${S.model}」を一度実行してください。`; }
+    return true;
+  } catch (e) {
+    st.className = 'status err'; st.textContent = 'Ollamaにつながりません';
+    $('#checkMsg').textContent = '下の手順を確認してください。';
+    $('#help').classList.add('show');
+    return false;
+  }
+}
+$('#status').onclick = () => { checkConnection(); };
+$('#check').onclick = checkConnection;
+checkConnection();
+
+// ---------- テキストの整形と段落分け ----------
+function clean(t) {
+  return t
+    .replace(/(\p{Ll})-\n(\p{Ll})/gu, '$1$2')   // 行末ハイフンで切れた単語をつなぐ
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/[ \t ]{2,}/g, ' ')
+    .replace(/<\|plamo:[a-z]+\|>/g, '')
+    .trim();
+}
+
+function splitParagraphs(text) {
+  text = text.replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+  let blocks = text.split(/\n[ \t]*\n+/);
+  // 空行がなく行がたくさんある貼り付け（PDFからのコピー）は、短く終わる行で段落を分ける
+  if (blocks.length === 1 && text.split('\n').length > 4) {
+    const lines = text.split('\n');
+    const lens = lines.map((l) => l.trim().length).sort((a, b) => a - b);
+    const typical = lens[Math.floor(lens.length * 0.8)] || 80;
+    blocks = []; let cur = [];
+    for (const l of lines) {
+      cur.push(l);
+      const t = l.trim();
+      if (/[.!?:]["')\]]?$/.test(t) && t.length < typical * 0.75) { blocks.push(cur.join('\n')); cur = []; }
+    }
+    if (cur.length) blocks.push(cur.join('\n'));
+  }
+  const out = [];
+  for (const b of blocks) {
+    const p = clean(b);
+    if (!p) continue;
+    out.push(...chunk(p, 1200));
+  }
+  return out;
+}
+
+// 長すぎる段落は文の区切りで分ける（2Bモデルは短い方が訳が安定する）
+function chunk(p, max) {
+  if (p.length <= max) return [p];
+  const sents = p.split(/(?<=[.!?])\s+(?=[A-Z(\[“"])/);
+  const res = []; let cur = '';
+  for (const s of sents) {
+    if (cur && (cur + ' ' + s).length > max) { res.push(cur); cur = s; }
+    else cur = cur ? cur + ' ' + s : s;
+  }
+  if (cur) res.push(cur);
+  return res;
+}
+
+// ---------- PDF の読み込み ----------
+let pdfjs = null;
+async function loadPdfjs() {
+  if (pdfjs) return pdfjs;
+  const v = '4.10.38';
+  pdfjs = await import(`https://cdn.jsdelivr.net/npm/pdfjs-dist@${v}/build/pdf.min.mjs`);
+  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${v}/build/pdf.worker.min.mjs`;
+  return pdfjs;
+}
+
+async function pdfToText(file) {
+  const lib = await loadPdfjs();
+  const doc = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const paras = []; let cur = null; let prev = null;
+  const endsSentence = (t) => /[.!?:]["')\]]?$/.test(t);
+  for (let n = 1; n <= doc.numPages; n++) {
+    $('#progress').textContent = `PDFを読み込み中… ${n}/${doc.numPages}ページ`;
+    const page = await doc.getPage(n);
+    const tc = await page.getTextContent();
+    // テキスト片を行にまとめる
+    const lines = []; let line = null;
+    for (const it of tc.items) {
+      if (!('str' in it)) continue;
+      if (!line) line = { text: '', x: it.transform[4], y: it.transform[5], h: Math.abs(it.height) || 10 };
+      line.text += it.str;
+      if (it.hasEOL) { if (line.text.trim()) lines.push(line); line = null; }
+    }
+    if (line && line.text.trim()) lines.push(line);
+    // 行間の典型値
+    const gaps = [];
+    for (let i = 1; i < lines.length; i++) { const g = lines[i - 1].y - lines[i].y; if (g > 0) gaps.push(g); }
+    gaps.sort((a, b) => a - b);
+    const typGap = gaps[Math.floor(gaps.length / 2)] || 12;
+
+    for (let i = 0; i < lines.length; i++) {
+      const L = lines[i]; const t = L.text.trim();
+      if (/^\d{1,4}$/.test(t)) continue; // ページ番号
+      let newPara = !cur;
+      if (cur && prev) {
+        if (prev.page !== n) newPara = endsSentence(prev.text.trim());
+        else {
+          const gap = prev.y - L.y;
+          if (gap < -2 || gap > typGap * 1.5) newPara = true;          // 段組みの移動・大きな行間
+          else if (endsSentence(prev.text.trim()) && L.x > prev.x + 6) newPara = true; // 字下げ
+        }
+      }
+      if (newPara) { if (cur) paras.push(cur); cur = []; }
+      cur.push(t);
+      prev = { ...L, page: n };
+    }
+  }
+  if (cur) paras.push(cur);
+  let texts = paras.map((p) => clean(p.join('\n'))).filter((p) => p.length > 1);
+  if (S.cutRefs) {
+    const k = texts.findIndex((p, i) => i > 3 && /^(\d+\.?\s*)?(references|bibliography|参考文献)$/i.test(p));
+    if (k > 0) texts = texts.slice(0, k);
+  }
+  return texts.join('\n\n');
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { alert('PDFファイルを選んでください。'); return; }
+  try {
+    $('#src').value = await pdfToText(file);
+    $('#progress').textContent = `「${file.name}」を読み込みました。必要なら編集してから「翻訳する」を押してください。`;
+  } catch (e) {
+    $('#progress').textContent = 'PDFを読み込めませんでした：' + e.message;
+  }
+}
+$('#file').onchange = (e) => handleFile(e.target.files[0]);
+const drop = $('#drop');
+for (const ev of ['dragenter', 'dragover']) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
+for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); });
+drop.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
+
+// ---------- プロンプトと生成 ----------
+function parseGlossary(text) {
+  return text.split('\n').map((l) => l.split(/\s*(?:=|\t|→)\s*/)).filter((a) => a.length >= 2 && a[0].trim() && a[1].trim())
+    .map(([s, t]) => [s.trim(), t.trim()]);
+}
+
+function buildPrompt(input, context) {
+  let p = '<|plamo:tag|>dataset<|plamo:msg|>translation';
+  if (context) p += '<|plamo:tag|>context<|plamo:msg|>' + context;
+  const low = input.toLowerCase();
+  const g = parseGlossary(S.glossary).filter(([s]) => low.includes(s.toLowerCase()));
+  if (g.length) p += '<|plamo:tag|>glossary' + g.map(([s, t]) => `<|plamo:index|>${s}<|plamo:item|>${t}`).join('');
+  p += '<|plamo:tag|>input<|plamo:msg|>' + input;
+  p += `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${S.target}`;
+  if (S.target === 'ja' && S.form) p += `<|plamo:key|>form<|plamo:val|>${S.form}`;
+  return p + '<|plamo:msg|>';
+}
+
+async function generate(prompt, signal, onText) {
+  const res = await fetch(base() + '/api/generate', {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: S.model, prompt, raw: true, stream: true, keep_alive: '15m',
+      options: { temperature: 0, num_ctx: 4096, num_predict: 2048, stop: STOP },
+    }),
+  });
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { msg = (await res.json()).error || msg; } catch {}
+    throw new Error(msg);
+  }
+  const reader = res.body.getReader(); const dec = new TextDecoder();
+  let buf = '', out = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      const j = JSON.parse(line);
+      if (j.error) throw new Error(j.error);
+      if (j.response) { out += j.response; onText(out); }
+    }
+  }
+  return out.trim();
+}
+
+// ---------- 画面 ----------
+let items = []; let controller = null;
+
+function render() {
+  const out = $('#out'); out.innerHTML = '';
+  items.forEach((it, idx) => {
+    const pair = document.createElement('div'); pair.className = 'pair';
+    const en = document.createElement('div'); en.className = 'en'; en.textContent = it.src;
+    const ja = document.createElement('div'); ja.className = 'ja';
+    it.el = ja; paint(it);
+    const redo = document.createElement('button'); redo.className = 'redo'; redo.textContent = '再翻訳';
+    redo.onclick = () => runQueue([idx]);
+    it.redo = redo; ja.appendChild(redo);
+    pair.append(en, ja);
+    out.appendChild(pair);
+  });
+  $('#exportRow').style.display = items.length ? '' : 'none';
+}
+
+function paint(it) {
+  const el = it.el; if (!el) return;
+  const redo = it.redo;
+  el.className = 'ja' + (it.state === 'pending' || it.state === 'running' ? ' pending' : '') + (it.state === 'error' ? ' error' : '');
+  el.textContent = it.state === 'pending' ? '待機中…' : it.state === 'running' && !it.out ? '翻訳中…' : it.state === 'error' ? 'エラー：' + it.err : it.out;
+  if (redo) el.appendChild(redo);
+}
+
+function setProgress() {
+  const total = items.length, done = items.filter((x) => x.state === 'done' || x.state === 'skip').length;
+  $('#progress').textContent = total ? `${done} / ${total} 段落` : '';
+  $('#bar').style.display = controller ? 'block' : 'none';
+  $('#bar > div').style.width = total ? (100 * done / total) + '%' : '0';
+}
+
+async function runQueue(indices) {
+  if (controller) return;
+  controller = new AbortController();
+  $('#go').disabled = true; $('#stop').disabled = false;
+  for (const i of indices) { if (items[i].state !== 'skip') { items[i].state = 'pending'; items[i].out = ''; paint(items[i]); } }
+  setProgress();
+  try {
+    for (const i of indices) {
+      const it = items[i];
+      if (it.state === 'skip') continue;
+      it.state = 'running'; paint(it);
+      const ctx = S.useContext && i > 0 ? items[i - 1].src.slice(-600) : '';
+      try {
+        it.out = await generate(buildPrompt(it.src, ctx), controller.signal, (t) => { it.out = t; paint(it); });
+        it.state = 'done';
+      } catch (e) {
+        if (e.name === 'AbortError') { it.state = 'pending'; it.out = ''; paint(it); throw e; }
+        it.state = 'error';
+        it.err = /Failed to fetch|NetworkError|Load failed/.test(e.message) ? 'Ollama につながりません（右上の「設定」を確認）' : e.message;
+        paint(it); setProgress();
+        if (it.err.startsWith('Ollama')) { checkConnection(); break; }
+        continue;
+      }
+      paint(it); setProgress();
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error(e);
+  } finally {
+    controller = null;
+    $('#go').disabled = false; $('#stop').disabled = true;
+    items.forEach((x) => { if (x.state === 'pending') { x.state = 'stopped'; x.out = x.out || '（未翻訳）'; paint(x); } });
+    setProgress();
+  }
+}
+
+$('#go').onclick = () => {
+  const paras = splitParagraphs($('#src').value);
+  if (!paras.length) { $('#src').focus(); return; }
+  items = paras.map((src) => ({ src, out: '', state: /\p{L}{2,}/u.test(src) ? 'pending' : 'skip' }));
+  items.forEach((x) => { if (x.state === 'skip') x.out = x.src; });
+  render();
+  runQueue(items.map((_, i) => i));
+};
+$('#stop').onclick = () => controller && controller.abort();
+$('#src').addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') $('#go').click(); });
+
+$('#copyAll').onclick = async () => {
+  const text = items.map((x) => x.out).filter(Boolean).join('\n\n');
+  try { await navigator.clipboard.writeText(text); $('#copyAll').textContent = 'コピーしました'; }
+  catch { $('#copyAll').textContent = 'コピーできませんでした'; }
+  setTimeout(() => { $('#copyAll').textContent = '訳文をすべてコピー'; }, 1500);
+};
+$('#dlMd').onclick = () => {
+  const md = items.map((x) => `> ${x.src}\n\n${x.out}\n`).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+  a.download = `translation-${new Date().toISOString().slice(0, 10)}.md`;
+  a.click(); URL.revokeObjectURL(a.href);
+};
+$('#clear').onclick = () => { if (controller) return; items = []; render(); setProgress(); };
+
+// テスト用に公開
+window.__plamo = { splitParagraphs, buildPrompt, clean, chunk };
+</script>
+</body>
+</html>
