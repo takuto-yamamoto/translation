@@ -137,6 +137,7 @@
 <div id="fab">
   <span id="status" class="pill" title="クリックで再接続"><span class="dot"></span><span id="statusText">確認中…</span></span>
   <button id="fabStop" hidden>■ 止める</button>
+  <button id="backendBtn" title="翻訳に使うPC（クリックで切り替え）">⇄ 自動</button>
   <button id="themeBtn" title="テーマを切り替え">◐</button>
   <button id="settingsBtn" title="設定">⚙︎ 設定</button>
 </div>
@@ -207,11 +208,18 @@
   <label class="f"><input type="checkbox" id="useContext"> 直前の段落を文脈としてモデルに渡す（訳のつながりが良くなる）</label>
   <label class="f"><input type="checkbox" id="cutRefs"> 「References」以降は翻訳しない</label>
 
+  <label class="f">翻訳に使うPC</label>
+  <span class="seg" id="backendSeg"><button data-b="auto">自動（自宅PC優先）</button><button data-b="pc">自宅PC</button><button data-b="mac">このMac</button></span>
+
   <details style="margin-top:14px">
     <summary class="hint">詳細設定</summary>
-    <label class="f" for="url">Ollama のアドレス</label>
+    <label class="f" for="pcUrl">自宅PC のアドレス</label>
+    <input type="text" id="pcUrl" placeholder="https://〇〇〇.ts.net">
+    <label class="f" for="pcModel">自宅PC のモデル名</label>
+    <input type="text" id="pcModel">
+    <label class="f" for="url">このMac のアドレス</label>
     <input type="text" id="url">
-    <label class="f" for="model">モデル名</label>
+    <label class="f" for="model">このMac のモデル名</label>
     <input type="text" id="model">
   </details>
 
@@ -226,9 +234,11 @@ const STOP = ['<|plamo:tag|>', '<|plamo:bos|>'];
 const DEFAULTS = {
   url: 'http://localhost:11434',
   model: 'hf.co/pfnet/plamo-3-translate-2b-GGUF:Q4_K_M',
+  pcUrl: '', pcModel: 'hf.co/pfnet/plamo-3-translate-8b-GGUF:Q4_K_M', backend: 'auto',
   target: 'ja', form: 'plain', glossary: '', useContext: true, cutRefs: true,
   theme: 'auto', view: 'layout', side: 'both',
 };
+let controller = null; // 翻訳中の中断用
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -239,12 +249,14 @@ const save = () => { try { localStorage.setItem('plamo-settings', JSON.stringify
 
 $('#target').value = S.target; $('#form').value = S.form;
 $('#url').value = S.url; $('#model').value = S.model; $('#glossary').value = S.glossary;
+$('#pcUrl').value = S.pcUrl; $('#pcModel').value = S.pcModel;
 $('#useContext').checked = S.useContext; $('#cutRefs').checked = S.cutRefs;
 const syncForm = () => { $('#form').disabled = $('#target').value !== 'ja'; };
 syncForm();
 $('#target').onchange = () => { S.target = $('#target').value; syncForm(); save(); };
 $('#form').onchange = () => { S.form = $('#form').value; save(); };
-for (const id of ['url', 'model']) $('#' + id).oninput = (e) => { S[id] = e.target.value.trim() || DEFAULTS[id]; save(); };
+$('#pcUrl').oninput = (e) => { S.pcUrl = e.target.value.trim(); save(); };
+for (const id of ['url', 'model', 'pcModel']) $('#' + id).oninput = (e) => { S[id] = e.target.value.trim() || DEFAULTS[id]; save(); };
 $('#glossary').oninput = (e) => { S.glossary = e.target.value; save(); };
 for (const id of ['useContext', 'cutRefs']) $('#' + id).onchange = (e) => { S[id] = e.target.checked; save(); };
 $('#settingsBtn').onclick = () => $('#settings').showModal();
@@ -263,31 +275,77 @@ $('#themeBtn').onclick = () => { S.theme = { auto: 'light', light: 'dark', dark:
 applyTheme();
 
 // ================= 接続確認（つながるまで自動で再試行） =================
-const base = () => S.url.replace(/\/+$/, '');
-let connected = false, retryTimer = null;
+// 翻訳を頼む先（自宅PC か このMac）
+const MAC = () => ({ kind: 'mac', label: 'Mac', url: S.url.replace(/\/+$/, ''), model: S.model });
+const PC = () => ({ kind: 'pc', label: '自宅PC', url: S.pcUrl.replace(/\/+$/, ''), model: S.pcModel });
+let active = MAC();
+const base = () => active.url;
+let connected = false, retryTimer = null, checking = false;
 function setStatus(cls, text) { $('#status').className = 'pill ' + cls; $('#statusText').textContent = text; }
 
-async function checkConnection() {
-  clearTimeout(retryTimer);
+function candidates() {
+  const pcOk = !!S.pcUrl;
+  if (S.backend === 'pc') return pcOk ? [PC()] : [];
+  if (S.backend === 'mac') return [MAC()];
+  return pcOk ? [PC(), MAC()] : [MAC()];
+}
+
+// 1か所を調べる：'ok' | 'nomodel' | 'denied' | 'down'
+async function probe(t) {
   try {
-    const r = await fetch(base() + '/api/tags');
+    const r = await fetch(t.url + '/api/tags', { signal: AbortSignal.timeout(t.kind === 'pc' ? 4000 : 2500) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const { models = [] } = await r.json();
-    const want = S.model.toLowerCase();
-    const has = models.some((m) => (m.name || m.model || '').toLowerCase() === want);
-    connected = true;
-    if (has) { setStatus('ok', '接続OK'); $('#offline').hidden = true; }
-    else { setStatus('warn', 'モデルなし'); showOffline('モデルが見つかりません', ''); }
+    const want = t.model.toLowerCase();
+    return models.some((m) => (m.name || m.model || '').toLowerCase() === want) ? 'ok' : 'nomodel';
   } catch {
-    connected = false;
     // 動いているのに断られているのか、そもそも動いていないのかを見分ける
-    let alive = false;
-    try { await fetch(base() + '/api/version', { mode: 'no-cors' }); alive = true; } catch {}
-    setStatus('err', alive ? '接続が許可されていません' : '未接続');
-    showOffline(alive ? '接続が許可されていません' : '接続できません', '自動で再接続します。');
-    retryTimer = setTimeout(checkConnection, 4000);
+    try { await fetch(t.url + '/api/version', { mode: 'no-cors', signal: AbortSignal.timeout(2500) }); return 'denied'; } catch { return 'down'; }
   }
 }
+
+async function checkConnection() {
+  if (checking) return;
+  checking = true; clearTimeout(retryTimer);
+  try {
+    const list = candidates();
+    if (!list.length) { connected = false; setStatus('err', '自宅PC 未設定'); showOffline('自宅PC のアドレスが設定されていません', ''); return; }
+    const results = [];
+    for (const t of list) {
+      const st = await probe(t);
+      results.push([t, st]);
+      if (st === 'ok') break;
+    }
+    const hit = results.find(([, st]) => st === 'ok');
+    if (hit) {
+      active = hit[0]; connected = true;
+      setStatus('ok', `接続OK・${active.label}`); $('#offline').hidden = true;
+      // 自動モードで Mac を使っている間は、自宅PC が起動したら切り替える
+      if (S.backend === 'auto' && active.kind === 'mac' && S.pcUrl) retryTimer = setTimeout(checkConnection, 30000);
+      return;
+    }
+    connected = false;
+    const [t, st] = results.find(([, s]) => s === 'nomodel') || results.find(([, s]) => s === 'denied') || results[results.length - 1];
+    active = t;
+    const where = results.length > 1 ? '' : `（${t.label}）`;
+    if (st === 'nomodel') { connected = true; setStatus('warn', `モデルなし・${t.label}`); showOffline('モデルが見つかりません' + where, ''); }
+    else { setStatus('err', (st === 'denied' ? '接続が許可されていません' : '未接続') + where);
+      showOffline((st === 'denied' ? '接続が許可されていません' : '接続できません') + where, '自動で再接続します。'); }
+    retryTimer = setTimeout(checkConnection, st === 'down' && list.some((x) => x.kind === 'pc') ? 8000 : 4000);
+  } finally { checking = false; setProgressIdle(); }
+}
+function setProgressIdle() { if (controller) setProgress(); }
+
+function applyBackend() {
+  $$('#backendSeg button').forEach((b) => b.classList.toggle('on', b.dataset.b === S.backend));
+  $('#backendBtn').textContent = { auto: '⇄ 自動', pc: '🖥 自宅PC', mac: '💻 Mac' }[S.backend];
+}
+$$('#backendSeg button').forEach((b) => (b.onclick = () => { S.backend = b.dataset.b; save(); applyBackend(); checkConnection(); }));
+$('#backendBtn').onclick = () => {
+  if (controller) return;
+  S.backend = { auto: 'pc', pc: 'mac', mac: 'auto' }[S.backend]; save(); applyBackend(); checkConnection();
+};
+applyBackend();
 function showOffline(title, html) { $('#offTitle').textContent = title; $('#offBody').innerHTML = html; $('#offline').hidden = false; }
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 $('#status').onclick = () => checkConnection();
@@ -464,7 +522,7 @@ function buildPrompt(input, context) {
 async function generate(prompt, signal, onText) {
   const res = await fetch(base() + '/api/generate', {
     method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: S.model, prompt, raw: true, stream: true, keep_alive: '15m',
+    body: JSON.stringify({ model: active.model, prompt, raw: true, stream: true, keep_alive: '15m',
       options: { temperature: 0, num_ctx: 4096, num_predict: 2048, stop: STOP } }),
   });
   if (!res.ok) { let m = 'HTTP ' + res.status; try { m = (await res.json()).error || m; } catch {} throw new Error(m); }
@@ -488,7 +546,7 @@ async function generate(prompt, signal, onText) {
 
 // ================= 結果の状態 =================
 // item: { src, out, state: pending|running|done|error|skip|stopped, block?, cell?, ov? }
-let items = [], controller = null;
+let items = [];
 
 function makeItems() {
   if (pdf) {
@@ -638,8 +696,8 @@ function setProgress() {
   const done = items.filter((x) => x.state === 'done').length;
   const txt = total ? `${done} / ${total} 段落` : '';
   $('#progress').textContent = txt;
-  if (controller) setStatus('ok', `翻訳中 ${done}/${total}`);
-  else if (connected) setStatus('ok', '接続OK');
+  if (controller) setStatus('ok', `翻訳中 ${done}/${total}・${active.label}`);
+  else if (connected && $('#offline').hidden) setStatus('ok', `接続OK・${active.label}`);
   $('#fabStop').hidden = !controller;
 }
 
@@ -649,7 +707,9 @@ async function runQueue(indices) {
   for (const i of indices) if (items[i].state !== 'skip') { items[i].state = 'pending'; items[i].out = ''; paint(items[i]); }
   setProgress();
   try {
-    for (const i of indices) {
+    let failovers = 0;
+    for (let k = 0; k < indices.length; k++) {
+      const i = indices[k];
       const it = items[i];
       if (it.state === 'skip') continue;
       it.state = 'running'; paint(it);
@@ -662,9 +722,15 @@ async function runQueue(indices) {
       } catch (e) {
         if (e.name === 'AbortError') { it.state = 'stopped'; it.out = ''; paint(it); throw e; }
         it.state = 'error';
-        it.err = /Failed to fetch|NetworkError|Load failed/.test(e.message) ? 'Ollama につながりません' : e.message;
+        it.err = (e.name === 'TypeError' || /Failed to fetch|network|Load failed|timed out/i.test(e.message)) ? 'Ollama につながりません' : e.message;
         paint(it);
-        if (it.err.startsWith('Ollama')) { checkConnection(); break; }
+        if (it.err.startsWith('Ollama')) {
+          // 自宅PCが落ちたら Mac に切り替えて続ける（自動モードのとき）
+          const before = active.kind;
+          await checkConnection();
+          if (connected && $('#offline').hidden && active.kind !== before && failovers++ < 2) { k--; continue; }
+          break;
+        }
       }
       paint(it); setProgress();
     }
